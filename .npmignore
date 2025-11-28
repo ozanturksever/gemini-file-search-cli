@@ -1,0 +1,16 @@
+# Source files we don't need in package
+manager.ts
+fileapi.md
+sample.mbox
+
+# Development files
+.gitignore
+.git/
+.idea/
+.vscode/
+
+# Build artifacts we don't distribute
+bun.lockb
+
+# Test files
+*.mbox

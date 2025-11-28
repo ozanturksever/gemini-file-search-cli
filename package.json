@@ -1,0 +1,52 @@
+{
+  "name": "gemini-file-search-cli",
+  "version": "1.0.0",
+  "description": "CLI tool for managing Google Gemini File Search stores - upload files, query with RAG, and manage document metadata",
+  "type": "module",
+  "bin": {
+    "gemini-file-search": "./src/cli.ts"
+  },
+  "main": "src/cli.ts",
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "build": "bun build --compile ./src/cli.ts --outfile ./dist/gemini-file-search --target bun",
+    "postbuild": "chmod +x dist/gemini-file-search",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "src",
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "gemini",
+    "google",
+    "ai",
+    "file-search",
+    "rag",
+    "retrieval-augmented-generation",
+    "cli",
+    "bun"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ozanturksever/gemini-file-search-cli.git"
+  },
+  "homepage": "https://github.com/ozanturksever/gemini-file-search-cli#readme",
+  "bugs": {
+    "url": "https://github.com/ozanturksever/gemini-file-search-cli/issues"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "postal-mime": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}
