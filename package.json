@@ -4,7 +4,7 @@
   "description": "CLI tool for managing Google Gemini File Search stores - upload files, query with RAG, and manage document metadata",
   "type": "module",
   "bin": {
-    "gemini-file-search": "./src/cli.ts"
+    "gemini-file-search": "src/cli.ts"
   },
   "main": "src/cli.ts",
   "scripts": {
@@ -32,7 +32,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ozanturksever/gemini-file-search-cli.git"
+    "url": "git+https://github.com/ozanturksever/gemini-file-search-cli.git"
   },
   "homepage": "https://github.com/ozanturksever/gemini-file-search-cli#readme",
   "bugs": {
