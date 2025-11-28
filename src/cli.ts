@@ -131,7 +131,16 @@ async function deleteFiles(ai: GoogleGenAI, storeName: string, filter: string): 
 
 // --- Upload Logic ---
 
-async function processMbox(ai: GoogleGenAI, filePath: string, storeName: string): Promise<void> {
+function parseMetadataValue(key: string, value: string): any {
+    // Try to parse as number
+    if (!isNaN(Number(value)) && !isNaN(parseFloat(value))) {
+        return { key, numericValue: parseFloat(value) };
+    }
+    // Otherwise treat as string
+    return { key, stringValue: value };
+}
+
+async function processMbox(ai: GoogleGenAI, filePath: string, storeName: string, customMeta: Map<string, string>): Promise<void> {
     console.log(`Processing mbox file as email thread: ${filePath}`);
     const fileContent = await readFile(filePath, 'utf-8');
     const directory = dirname(resolve(filePath));
@@ -223,6 +232,11 @@ async function processMbox(ai: GoogleGenAI, filePath: string, storeName: string)
         metadata.push({ key: 'end_date', stringValue: maxDate.toISOString() });
     }
 
+    // Add custom metadata
+    for (const [key, value] of customMeta) {
+        metadata.push(parseMetadataValue(key, value));
+    }
+
     console.log(`Uploading thread: ${originalFilename}`);
     console.log(`  Emails: ${emailParts.length}`);
     console.log(`  Participants: ${allParticipants.size}`);
@@ -240,12 +254,14 @@ async function processMbox(ai: GoogleGenAI, filePath: string, storeName: string)
     await waitForOperation(ai, operation);
 }
 
-async function uploadCommand(ai: GoogleGenAI, path: string, storeName: string, globPattern?: string): Promise<void> {
+async function uploadCommand(ai: GoogleGenAI, path: string, storeName: string, globPattern?: string, customMeta?: Map<string, string>): Promise<void> {
     let fullStoreName = storeName;
     if (!storeName.startsWith('fileSearchStores/')) {
         const found = await createOrGetStore(ai, storeName);
         fullStoreName = found;
     }
+
+    const meta = customMeta || new Map<string, string>();
 
     const stats = await stat(path);
     if (stats.isDirectory()) {
@@ -254,14 +270,14 @@ async function uploadCommand(ai: GoogleGenAI, path: string, storeName: string, g
             const glob = new Bun.Glob(globPattern);
             for await (const relativePath of glob.scan({ cwd: path, onlyFiles: true })) {
                 const fullPath = join(path, relativePath);
-                await uploadCommand(ai, fullPath, fullStoreName);
+                await uploadCommand(ai, fullPath, fullStoreName, undefined, meta);
             }
         } else {
             const entries = await readdir(path, { withFileTypes: true });
             for (const entry of entries) {
                 const fullPath = join(path, entry.name);
                 if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-                await uploadCommand(ai, fullPath, fullStoreName);
+                await uploadCommand(ai, fullPath, fullStoreName, undefined, meta);
             }
         }
     } else if (stats.isFile()) {
@@ -271,10 +287,19 @@ async function uploadCommand(ai: GoogleGenAI, path: string, storeName: string, g
         console.log(`File: ${path}, Type: ${rawMimeType} -> ${mimeType}`);
 
         if (path.endsWith('.mbox')) {
-            await processMbox(ai, path, fullStoreName);
+            await processMbox(ai, path, fullStoreName, meta);
         } else {
             console.log(`Uploading generic file: ${path}`);
             const directory = dirname(resolve(path));
+
+            const baseMetadata: any[] = [
+                { key: 'directory', stringValue: directory }
+            ];
+
+            // Add custom metadata
+            for (const [key, value] of meta) {
+                baseMetadata.push(parseMetadataValue(key, value));
+            }
 
             const operation = await ai.fileSearchStores.uploadToFileSearchStore({
                 file: path,
@@ -282,9 +307,7 @@ async function uploadCommand(ai: GoogleGenAI, path: string, storeName: string, g
                 config: {
                     displayName: basename(path),
                     mimeType: mimeType,
-                    customMetadata: [
-                        { key: 'directory', stringValue: directory }
-                    ] as any
+                    customMetadata: baseMetadata
                 }
             });
             await waitForOperation(ai, operation);
@@ -527,6 +550,7 @@ Commands:
 
   upload <path> --store <name>          Upload file(s) to a store
     [--glob <pattern>]                  Optional glob pattern for directory uploads
+    [--meta <key=value>]                Add custom metadata (can be repeated)
 
   files list <store>                    List files in a store
   files get <store> <filename>          Get a specific file by name
@@ -541,6 +565,7 @@ Examples:
   gemini-file-search stores create my-docs
   gemini-file-search upload ./docs --store my-docs
   gemini-file-search upload ./src --store my-code --glob "**/*.ts"
+  gemini-file-search upload ./doc.pdf --store my-docs --meta author=John --meta year=2024
   gemini-file-search files list my-docs
   gemini-file-search files get my-docs "report.pdf"
   gemini-file-search query my-docs "What are the main features?"
@@ -586,6 +611,7 @@ async function main() {
             let path = '';
             let store = '';
             let globPattern: string | undefined;
+            const customMeta = new Map<string, string>();
 
             for (let i = 1; i < args.length; i++) {
                 if (args[i] === '--store' && args[i + 1]) {
@@ -594,15 +620,22 @@ async function main() {
                 } else if (args[i] === '--glob' && args[i + 1]) {
                     globPattern = args[i + 1];
                     i++;
+                } else if (args[i] === '--meta' && args[i + 1]) {
+                    const [key, ...valueParts] = args[i + 1].split('=');
+                    const value = valueParts.join('=');
+                    if (key && value) {
+                        customMeta.set(key, value);
+                    }
+                    i++;
                 } else if (!args[i].startsWith('-')) {
                     path = args[i];
                 }
             }
             if (!path || !store) {
-                console.error('Usage: upload <path> --store <name> [--glob <pattern>]');
+                console.error('Usage: upload <path> --store <name> [--glob <pattern>] [--meta <key=value>]');
                 process.exit(1);
             }
-            await uploadCommand(ai, path, store, globPattern);
+            await uploadCommand(ai, path, store, globPattern, customMeta);
             break;
         }
 
