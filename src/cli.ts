@@ -41,19 +41,33 @@ async function findStoreByDisplayName(ai: GoogleGenAI, displayName: string): Pro
 
 // --- Store Management ---
 
-async function listStores(ai: GoogleGenAI): Promise<void> {
-    console.log('\nListing all File Search Stores:\n');
+async function listStores(ai: GoogleGenAI, jsonOutput: boolean = false): Promise<void> {
     const stores = await ai.fileSearchStores.list();
-    let count = 0;
+    const storeList: any[] = [];
+    
     for await (const store of stores) {
-        count++;
-        console.log(`  ${count}. ${store.displayName || '(no name)'}`);
-        console.log(`     Name: ${store.name}`);
-        console.log(`     Created: ${store.createTime}`);
-        console.log('');
+        storeList.push({
+            displayName: store.displayName || null,
+            name: store.name,
+            createTime: store.createTime
+        });
     }
-    if (count === 0) console.log('  No stores found.');
-    else console.log(`Total: ${count} store(s)`);
+
+    if (jsonOutput) {
+        console.log(JSON.stringify(storeList, null, 2));
+    } else {
+        console.log('\nListing all File Search Stores:\n');
+        let count = 0;
+        for (const store of storeList) {
+            count++;
+            console.log(`  ${count}. ${store.displayName || '(no name)'}`);
+            console.log(`     Name: ${store.name}`);
+            console.log(`     Created: ${store.createTime}`);
+            console.log('');
+        }
+        if (count === 0) console.log('  No stores found.');
+        else console.log(`Total: ${count} store(s)`);
+    }
 }
 
 async function createStore(ai: GoogleGenAI, displayName: string): Promise<void> {
@@ -138,6 +152,61 @@ function parseMetadataValue(key: string, value: string): any {
     }
     // Otherwise treat as string
     return { key, stringValue: value };
+}
+
+async function getCustomMetadataFromHook(filePath: string, mimeType: string): Promise<Map<string, string>> {
+    const hookScript = process.env.GET_CUSTOM_METADATA;
+    const result = new Map<string, string>();
+    
+    if (!hookScript) {
+        return result;
+    }
+
+    try {
+        const absolutePath = resolve(filePath);
+        const proc = Bun.spawn([hookScript], {
+            env: {
+                ...process.env,
+                FILE_PATH: absolutePath,
+                FILE_NAME: basename(filePath),
+                FILE_DIR: dirname(absolutePath),
+                FILE_MIME_TYPE: mimeType
+            },
+            stdout: 'pipe',
+            stderr: 'pipe'
+        });
+
+        const stdout = await new Response(proc.stdout).text();
+        const stderr = await new Response(proc.stderr).text();
+        const exitCode = await proc.exited;
+
+        if (exitCode !== 0) {
+            console.error(`Warning: Metadata hook script failed with exit code ${exitCode}`);
+            if (stderr) console.error(`  stderr: ${stderr.trim()}`);
+            return result;
+        }
+
+        // Parse key=value lines from stdout
+        const lines = stdout.split('\n').filter(line => line.trim());
+        for (const line of lines) {
+            const eqIndex = line.indexOf('=');
+            if (eqIndex > 0) {
+                const key = line.substring(0, eqIndex).trim();
+                const value = line.substring(eqIndex + 1).trim();
+                if (key && value) {
+                    result.set(key, value);
+                }
+            }
+        }
+
+        if (result.size > 0) {
+            console.log(`  Hook metadata: ${result.size} key(s) from script`);
+        }
+    } catch (e: any) {
+        console.error(`Warning: Failed to run metadata hook script: ${e.message}`);
+    }
+
+    return result;
 }
 
 async function processMbox(ai: GoogleGenAI, filePath: string, storeName: string, customMeta: Map<string, string>): Promise<void> {
@@ -286,8 +355,13 @@ async function uploadCommand(ai: GoogleGenAI, path: string, storeName: string, g
 
         console.log(`File: ${path}, Type: ${rawMimeType} -> ${mimeType}`);
 
+        // Get hook metadata for all files
+        const hookMeta = await getCustomMetadataFromHook(path, mimeType);
+        
         if (path.endsWith('.mbox')) {
-            await processMbox(ai, path, fullStoreName, meta);
+            // Merge hook metadata with custom meta
+            const combinedMeta = new Map([...meta, ...hookMeta]);
+            await processMbox(ai, path, fullStoreName, combinedMeta);
         } else {
             console.log(`Uploading generic file: ${path}`);
             const directory = dirname(resolve(path));
@@ -296,8 +370,13 @@ async function uploadCommand(ai: GoogleGenAI, path: string, storeName: string, g
                 { key: 'directory', stringValue: directory }
             ];
 
-            // Add custom metadata
+            // Add custom metadata from --meta flags
             for (const [key, value] of meta) {
+                baseMetadata.push(parseMetadataValue(key, value));
+            }
+
+            // Add hook metadata
+            for (const [key, value] of hookMeta) {
                 baseMetadata.push(parseMetadataValue(key, value));
             }
 
@@ -328,7 +407,7 @@ async function createOrGetStore(ai: GoogleGenAI, storeName: string): Promise<str
 
 // --- Query Logic ---
 
-async function queryStore(ai: GoogleGenAI, storeName: string, queryText: string, modelName: string = 'gemini-3-pro-preview', filter?: string): Promise<void> {
+async function queryStore(ai: GoogleGenAI, storeName: string, queryText: string, modelName: string = 'gemini-3-pro-preview', filter?: string, jsonOutput: boolean = false): Promise<void> {
     let fullStoreName = storeName;
     if (!storeName.startsWith('fileSearchStores/')) {
         const found = await findStoreByDisplayName(ai, storeName);
@@ -339,11 +418,13 @@ async function queryStore(ai: GoogleGenAI, storeName: string, queryText: string,
         fullStoreName = found;
     }
 
-    console.log(`Querying store: ${fullStoreName}`);
-    console.log(`Query: ${queryText}`);
-    console.log(`Model: ${modelName}`);
-    if (filter) {
-        console.log(`Filter: ${filter}`);
+    if (!jsonOutput) {
+        console.log(`Querying store: ${fullStoreName}`);
+        console.log(`Query: ${queryText}`);
+        console.log(`Model: ${modelName}`);
+        if (filter) {
+            console.log(`Filter: ${filter}`);
+        }
     }
 
     const fileSearchConfig: any = {
@@ -386,8 +467,10 @@ async function queryStore(ai: GoogleGenAI, storeName: string, queryText: string,
             }
         ]
     };
-    console.log('Config:', JSON.stringify(config, null, 2));
-    console.log('---');
+    if (!jsonOutput) {
+        console.log('Config:', JSON.stringify(config, null, 2));
+        console.log('---');
+    }
 
     try {
         const response = await ai.models.generateContent({
@@ -396,17 +479,30 @@ async function queryStore(ai: GoogleGenAI, storeName: string, queryText: string,
             config: config
         });
 
-        console.log('Response:');
-        console.log(response.text);
+        if (jsonOutput) {
+            console.log(JSON.stringify({
+                query: queryText,
+                model: modelName,
+                filter: filter || null,
+                response: response.text
+            }, null, 2));
+        } else {
+            console.log('Response:');
+            console.log(response.text);
+        }
 
     } catch (error: any) {
-        console.error('Error querying store:', error.message);
+        if (jsonOutput) {
+            console.log(JSON.stringify({ error: error.message }));
+        } else {
+            console.error('Error querying store:', error.message);
+        }
     }
 }
 
 // --- Get File ---
 
-async function getFile(ai: GoogleGenAI, storeName: string, filename: string): Promise<void> {
+async function getFile(ai: GoogleGenAI, storeName: string, filename: string, jsonOutput: boolean = false): Promise<void> {
     let fullStoreName = storeName;
     if (!storeName.startsWith('fileSearchStores/')) {
         const found = await findStoreByDisplayName(ai, storeName);
@@ -417,7 +513,9 @@ async function getFile(ai: GoogleGenAI, storeName: string, filename: string): Pr
         fullStoreName = found;
     }
 
-    console.log(`Looking up file: ${filename} in ${fullStoreName}...`);
+    if (!jsonOutput) {
+        console.log(`Looking up file: ${filename} in ${fullStoreName}...`);
+    }
 
     try {
         const response = await ai.fileSearchStores.documents.list({
@@ -435,12 +533,16 @@ async function getFile(ai: GoogleGenAI, storeName: string, filename: string): Pr
         }
 
         if (matchingDocs.length === 0) {
-            console.error(`Error: No file found with name "${filename}"`);
+            if (jsonOutput) {
+                console.log(JSON.stringify({ error: `No file found with name "${filename}"` }));
+            } else {
+                console.error(`Error: No file found with name "${filename}"`);
+            }
             process.exit(1);
         }
 
         if (matchingDocs.length === 1) {
-            printDocumentDetails(matchingDocs[0]);
+            printDocumentDetails(matchingDocs[0], jsonOutput);
             return;
         }
 
@@ -453,61 +555,101 @@ async function getFile(ai: GoogleGenAI, storeName: string, filename: string): Pr
             });
 
             if (dirMatches.length === 1) {
-                printDocumentDetails(dirMatches[0]);
+                printDocumentDetails(dirMatches[0], jsonOutput);
                 return;
             }
 
             if (dirMatches.length > 1) {
-                console.error(`Error: Multiple files found matching "${filename}":`);
-                for (const d of dirMatches) {
-                    const dirMeta = d.customMetadata?.find((m: any) => m.key === 'directory');
-                    console.error(`  - ${d.displayName} (directory: ${dirMeta?.stringValue || 'unknown'})`);
+                const matches = dirMatches.map(d => ({
+                    displayName: d.displayName,
+                    directory: d.customMetadata?.find((m: any) => m.key === 'directory')?.stringValue || 'unknown'
+                }));
+                if (jsonOutput) {
+                    console.log(JSON.stringify({ error: 'Multiple files found', matches }));
+                } else {
+                    console.error(`Error: Multiple files found matching "${filename}":`);
+                    for (const m of matches) {
+                        console.error(`  - ${m.displayName} (directory: ${m.directory})`);
+                    }
                 }
                 process.exit(1);
             }
         }
 
         // Still multiple matches without directory disambiguation
-        console.error(`Error: Multiple files found with name "${filename}":`);
-        for (const d of matchingDocs) {
-            const dirMeta = d.customMetadata?.find((m: any) => m.key === 'directory');
-            console.error(`  - ${d.displayName} (directory: ${dirMeta?.stringValue || 'unknown'})`);
+        const matches = matchingDocs.map(d => ({
+            displayName: d.displayName,
+            directory: d.customMetadata?.find((m: any) => m.key === 'directory')?.stringValue || 'unknown'
+        }));
+        if (jsonOutput) {
+            console.log(JSON.stringify({ error: 'Multiple files found', matches, tip: 'Include a directory path to disambiguate' }));
+        } else {
+            console.error(`Error: Multiple files found with name "${filename}":`);
+            for (const m of matches) {
+                console.error(`  - ${m.displayName} (directory: ${m.directory})`);
+            }
+            console.error('\nTip: Include a directory path to disambiguate, e.g., "path/to/file.txt"');
         }
-        console.error('\nTip: Include a directory path to disambiguate, e.g., "path/to/file.txt"');
         process.exit(1);
 
     } catch (e: any) {
-        console.error('Error getting file:', e.message);
+        if (jsonOutput) {
+            console.log(JSON.stringify({ error: e.message }));
+        } else {
+            console.error('Error getting file:', e.message);
+        }
         process.exit(1);
     }
 }
 
-function printDocumentDetails(doc: any): void {
-    console.log(`\nDocument: ${doc.displayName || '(no name)'}`);
-    console.log(`  Name: ${doc.name}`);
-    if (doc.customMetadata && doc.customMetadata.length > 0) {
-        console.log('  Metadata:');
-        for (const m of doc.customMetadata) {
-            const value = m.stringValue ?? m.numericValue ?? (m.stringListValue ? JSON.stringify(m.stringListValue.values) : 'undefined');
-            console.log(`    ${m.key}: ${value}`);
+function printDocumentDetails(doc: any, jsonOutput: boolean = false): void {
+    if (jsonOutput) {
+        console.log(JSON.stringify({
+            displayName: doc.displayName || null,
+            name: doc.name,
+            metadata: doc.customMetadata ? formatMetadataForJson(doc.customMetadata) : {}
+        }, null, 2));
+    } else {
+        console.log(`\nDocument: ${doc.displayName || '(no name)'}`);
+        console.log(`  Name: ${doc.name}`);
+        if (doc.customMetadata && doc.customMetadata.length > 0) {
+            console.log('  Metadata:');
+            for (const m of doc.customMetadata) {
+                const value = m.stringValue ?? m.numericValue ?? (m.stringListValue ? JSON.stringify(m.stringListValue.values) : 'undefined');
+                console.log(`    ${m.key}: ${value}`);
+            }
         }
     }
 }
 
 // --- List Files ---
 
-async function listFiles(ai: GoogleGenAI, storeName: string): Promise<void> {
+function formatMetadataForJson(customMetadata: any[]): Record<string, any> {
+    const result: Record<string, any> = {};
+    for (const m of customMetadata) {
+        result[m.key] = m.stringValue ?? m.numericValue ?? (m.stringListValue?.values ?? null);
+    }
+    return result;
+}
+
+async function listFiles(ai: GoogleGenAI, storeName: string, jsonOutput: boolean = false): Promise<void> {
     let fullStoreName = storeName;
     if (!storeName.startsWith('fileSearchStores/')) {
         const found = await findStoreByDisplayName(ai, storeName);
         if (!found) {
-            console.error(`Error: Store with display name "${storeName}" not found.`);
+            if (jsonOutput) {
+                console.log(JSON.stringify({ error: `Store with display name "${storeName}" not found.` }));
+            } else {
+                console.error(`Error: Store with display name "${storeName}" not found.`);
+            }
             return;
         }
         fullStoreName = found;
     }
 
-    console.log(`Listing documents in ${fullStoreName}...`);
+    if (!jsonOutput) {
+        console.log(`Listing documents in ${fullStoreName}...`);
+    }
 
     try {
         const response = await ai.fileSearchStores.documents.list({
@@ -515,20 +657,37 @@ async function listFiles(ai: GoogleGenAI, storeName: string): Promise<void> {
             config: { pageSize: 20 }
         });
 
+        const documents: any[] = [];
         for await (const doc of response) {
             const d = doc as any;
-            console.log(`Document: ${d.displayName || '(no name)'} (${d.name})`);
-            if (d.customMetadata && d.customMetadata.length > 0) {
-                console.log('  Metadata:');
-                for (const m of d.customMetadata) {
-                    const value = m.stringValue ?? m.numericValue ?? (m.stringListValue ? JSON.stringify(m.stringListValue.values) : 'undefined');
-                    console.log(`    ${m.key}: ${value}`);
+            documents.push({
+                displayName: d.displayName || null,
+                name: d.name,
+                metadata: d.customMetadata ? formatMetadataForJson(d.customMetadata) : {}
+            });
+        }
+
+        if (jsonOutput) {
+            console.log(JSON.stringify(documents, null, 2));
+        } else {
+            for (const d of documents) {
+                console.log(`Document: ${d.displayName || '(no name)'} (${d.name})`);
+                if (Object.keys(d.metadata).length > 0) {
+                    console.log('  Metadata:');
+                    for (const [key, value] of Object.entries(d.metadata)) {
+                        const displayValue = Array.isArray(value) ? JSON.stringify(value) : value;
+                        console.log(`    ${key}: ${displayValue}`);
+                    }
                 }
+                console.log('---');
             }
-            console.log('---');
         }
     } catch (e: any) {
-        console.error('Error listing files:', e.message);
+        if (jsonOutput) {
+            console.log(JSON.stringify({ error: e.message }));
+        } else {
+            console.error('Error listing files:', e.message);
+        }
     }
 }
 
@@ -541,7 +700,8 @@ gemini-file-search - CLI tool for Google Gemini File Search stores
 Usage: gemini-file-search <command> [options]
 
 Environment Variables:
-  GEMINI_API_KEY    Your Google Gemini API key (required)
+  GEMINI_API_KEY       Your Google Gemini API key (required)
+  GET_CUSTOM_METADATA  Path to script that outputs key=value metadata for uploads
 
 Commands:
   stores list                           List all file search stores
@@ -560,6 +720,9 @@ Commands:
     [--model <model>]                   Model to use (default: gemini-2.5-flash)
     [--filter <key=value>]              Filter by metadata
 
+Global Options:
+  --json                                Output results in JSON format
+
 Examples:
   gemini-file-search stores list
   gemini-file-search stores create my-docs
@@ -570,6 +733,7 @@ Examples:
   gemini-file-search files get my-docs "report.pdf"
   gemini-file-search query my-docs "What are the main features?"
   gemini-file-search query my-docs "Summarize" --filter year=2024
+  gemini-file-search files list my-docs --json
 `);
 }
 
@@ -591,17 +755,21 @@ async function main() {
         process.exit(0);
     }
 
+    // Parse global --json flag
+    const jsonOutput = args.includes('--json');
+    const filteredArgs = args.filter(a => a !== '--json');
+
     const apiKey = getApiKey();
     const ai = new GoogleGenAI({ apiKey });
 
     switch (command) {
         case 'stores':
-            if (args[1] === 'list') {
-                await listStores(ai);
-            } else if (args[1] === 'create' && args[2]) {
-                await createStore(ai, args[2]);
-            } else if (args[1] === 'delete' && args[2]) {
-                await deleteStore(ai, args[2]);
+            if (filteredArgs[1] === 'list') {
+                await listStores(ai, jsonOutput);
+            } else if (filteredArgs[1] === 'create' && filteredArgs[2]) {
+                await createStore(ai, filteredArgs[2]);
+            } else if (filteredArgs[1] === 'delete' && filteredArgs[2]) {
+                await deleteStore(ai, filteredArgs[2]);
             } else {
                 console.error('Invalid stores command. Use list, create <name>, or delete <name>.');
             }
@@ -613,22 +781,22 @@ async function main() {
             let globPattern: string | undefined;
             const customMeta = new Map<string, string>();
 
-            for (let i = 1; i < args.length; i++) {
-                if (args[i] === '--store' && args[i + 1]) {
-                    store = args[i + 1];
+            for (let i = 1; i < filteredArgs.length; i++) {
+                if (filteredArgs[i] === '--store' && filteredArgs[i + 1]) {
+                    store = filteredArgs[i + 1];
                     i++;
-                } else if (args[i] === '--glob' && args[i + 1]) {
-                    globPattern = args[i + 1];
+                } else if (filteredArgs[i] === '--glob' && filteredArgs[i + 1]) {
+                    globPattern = filteredArgs[i + 1];
                     i++;
-                } else if (args[i] === '--meta' && args[i + 1]) {
-                    const [key, ...valueParts] = args[i + 1].split('=');
+                } else if (filteredArgs[i] === '--meta' && filteredArgs[i + 1]) {
+                    const [key, ...valueParts] = filteredArgs[i + 1].split('=');
                     const value = valueParts.join('=');
                     if (key && value) {
                         customMeta.set(key, value);
                     }
                     i++;
-                } else if (!args[i].startsWith('-')) {
-                    path = args[i];
+                } else if (!filteredArgs[i].startsWith('-')) {
+                    path = filteredArgs[i];
                 }
             }
             if (!path || !store) {
@@ -640,20 +808,20 @@ async function main() {
         }
 
         case 'files':
-            if (args[1] === 'get') {
-                const store = args[2];
-                const filename = args[3];
+            if (filteredArgs[1] === 'get') {
+                const store = filteredArgs[2];
+                const filename = filteredArgs[3];
                 if (!store || !filename) {
                     console.error('Usage: files get <store> <filename>');
                     process.exit(1);
                 }
-                await getFile(ai, store, filename);
-            } else if (args[1] === 'delete') {
-                const store = args[2];
+                await getFile(ai, store, filename, jsonOutput);
+            } else if (filteredArgs[1] === 'delete') {
+                const store = filteredArgs[2];
                 let filter = '';
-                for (let i = 3; i < args.length; i++) {
-                    if (args[i] === '--filter' && args[i + 1]) {
-                        filter = args[i + 1];
+                for (let i = 3; i < filteredArgs.length; i++) {
+                    if (filteredArgs[i] === '--filter' && filteredArgs[i + 1]) {
+                        filter = filteredArgs[i + 1];
                         i++;
                     }
                 }
@@ -662,30 +830,30 @@ async function main() {
                     process.exit(1);
                 }
                 await deleteFiles(ai, store, filter);
-            } else if (args[1] === 'list') {
-                const store = args[2];
+            } else if (filteredArgs[1] === 'list') {
+                const store = filteredArgs[2];
                 if (!store) {
                     console.error('Usage: files list <store>');
                     process.exit(1);
                 }
-                await listFiles(ai, store);
+                await listFiles(ai, store, jsonOutput);
             } else {
                 console.error('Invalid files command.');
             }
             break;
 
         case 'query': {
-            const qStore = args[1];
-            const qText = args[2];
+            const qStore = filteredArgs[1];
+            const qText = filteredArgs[2];
             let model = 'gemini-3-pro-preview';
             let filter: string | undefined;
 
-            for (let i = 3; i < args.length; i++) {
-                if (args[i] === '--model' && args[i + 1]) {
-                    model = args[i + 1];
+            for (let i = 3; i < filteredArgs.length; i++) {
+                if (filteredArgs[i] === '--model' && filteredArgs[i + 1]) {
+                    model = filteredArgs[i + 1];
                     i++;
-                } else if (args[i] === '--filter' && args[i + 1]) {
-                    filter = args[i + 1];
+                } else if (filteredArgs[i] === '--filter' && filteredArgs[i + 1]) {
+                    filter = filteredArgs[i + 1];
                     i++;
                 }
             }
@@ -694,7 +862,7 @@ async function main() {
                 console.error('Usage: query <store> <query_text> [--model <model>] [--filter <key=value>]');
                 process.exit(1);
             }
-            await queryStore(ai, qStore, qText, model, filter);
+            await queryStore(ai, qStore, qText, model, filter, jsonOutput);
             break;
         }
 
