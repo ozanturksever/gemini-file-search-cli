@@ -1,6 +1,6 @@
 {
   "name": "gemini-file-search-cli",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CLI tool for managing Google Gemini File Search stores - upload files, query with RAG, and manage document metadata",
   "type": "module",
   "bin": {

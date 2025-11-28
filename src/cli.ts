@@ -132,79 +132,112 @@ async function deleteFiles(ai: GoogleGenAI, storeName: string, filter: string): 
 // --- Upload Logic ---
 
 async function processMbox(ai: GoogleGenAI, filePath: string, storeName: string): Promise<void> {
-    console.log(`Processing mbox file: ${filePath}`);
+    console.log(`Processing mbox file as email thread: ${filePath}`);
     const fileContent = await readFile(filePath, 'utf-8');
-    const directory = dirname(filePath);
+    const directory = dirname(resolve(filePath));
+    const originalFilename = basename(filePath);
 
-    const emails = fileContent.split(/^From /m).filter(e => e.trim().length > 0);
-    console.log(`Found ${emails.length} emails in mbox.`);
+    // Parse all emails in the mbox to collect metadata
+    const emailParts = fileContent.split(/^From /m).filter(e => e.trim().length > 0);
+    console.log(`Found ${emailParts.length} emails in thread.`);
 
-    for (let i = 0; i < emails.length; i++) {
-        const rawEmail = 'From ' + emails[i];
+    const allFromEmails = new Set<string>();
+    const allToEmails = new Set<string>();
+    const allParticipants = new Set<string>();
+    const allSubjects = new Set<string>();
+    let minDate: Date | null = null;
+    let maxDate: Date | null = null;
 
+    for (const emailPart of emailParts) {
+        const rawEmail = 'From ' + emailPart;
         const parser = new PostalMime();
         const email = await parser.parse(rawEmail);
 
-        const from = email.from?.address || '';
-
-        let year = '';
-        let month = '';
-        if (email.date) {
-            const date = new Date(email.date);
-            year = date.getFullYear().toString();
-            month = (date.getMonth() + 1).toString().padStart(2, '0');
+        // Collect from addresses
+        if (email.from?.address) {
+            allFromEmails.add(email.from.address);
+            allParticipants.add(email.from.address);
         }
 
-        const originalFilename = basename(filePath);
-        const subject = email.subject || '(no subject)';
-        const safeSubject = subject.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
-        const fileName = `${year}${month}_${safeSubject}_${i}.eml`;
-
-        const contentToUpload = rawEmail;
-
-        const tempPath = join('/tmp', fileName);
-        await Bun.write(tempPath, contentToUpload);
-
-        console.log(`Uploading email ${i + 1}/${emails.length}: ${subject}`);
-
-        const metadata: any[] = [
-            { key: 'from_email', stringValue: from },
-            { key: 'source_filename', stringValue: originalFilename },
-            { key: 'directory', stringValue: directory }
-        ];
-
-        const toList = email.to?.map(t => t.address).filter(Boolean) as string[] || [];
-        if (toList.length > 0) {
-            metadata.push({ key: 'to_email', stringListValue: { values: toList } });
-        }
-
-        const allParticipants = [
-            ...(email.to?.map(t => t.address) || []),
-            ...(email.cc?.map(c => c.address) || []),
-            ...(email.bcc?.map(b => b.address) || [])
-        ].filter(Boolean) as string[];
-
-        if (allParticipants.length > 0) {
-            metadata.push({ key: 'participants', stringListValue: { values: allParticipants } });
-        }
-
-        if (year) {
-            metadata.push({ key: 'year', numericValue: parseInt(year) });
-        }
-        if (month) {
-            metadata.push({ key: 'month', numericValue: parseInt(month) });
-        }
-
-        await ai.fileSearchStores.uploadToFileSearchStore({
-            file: tempPath,
-            fileSearchStoreName: storeName,
-            config: {
-                displayName: fileName,
-                mimeType: 'text/plain',
-                customMetadata: metadata
+        // Collect to addresses
+        email.to?.forEach(t => {
+            if (t.address) {
+                allToEmails.add(t.address);
+                allParticipants.add(t.address);
             }
         });
+
+        // Collect cc addresses
+        email.cc?.forEach(c => {
+            if (c.address) allParticipants.add(c.address);
+        });
+
+        // Collect bcc addresses
+        email.bcc?.forEach(b => {
+            if (b.address) allParticipants.add(b.address);
+        });
+
+        // Collect subjects
+        if (email.subject) {
+            allSubjects.add(email.subject);
+        }
+
+        // Track date range
+        if (email.date) {
+            const date = new Date(email.date);
+            if (!minDate || date < minDate) minDate = date;
+            if (!maxDate || date > maxDate) maxDate = date;
+        }
     }
+
+    // Build metadata
+    const metadata: any[] = [
+        { key: 'email_thread', stringValue: 'true' },
+        { key: 'email_count', numericValue: emailParts.length },
+        { key: 'directory', stringValue: directory }
+    ];
+
+    if (allFromEmails.size > 0) {
+        metadata.push({ key: 'from_emails', stringListValue: { values: Array.from(allFromEmails) } });
+    }
+
+    if (allToEmails.size > 0) {
+        metadata.push({ key: 'to_emails', stringListValue: { values: Array.from(allToEmails) } });
+    }
+
+    if (allParticipants.size > 0) {
+        metadata.push({ key: 'participants', stringListValue: { values: Array.from(allParticipants) } });
+    }
+
+    if (allSubjects.size > 0) {
+        metadata.push({ key: 'subjects', stringListValue: { values: Array.from(allSubjects) } });
+    }
+
+    if (minDate) {
+        metadata.push({ key: 'year', numericValue: minDate.getFullYear() });
+        metadata.push({ key: 'month', numericValue: minDate.getMonth() + 1 });
+        metadata.push({ key: 'start_date', stringValue: minDate.toISOString() });
+    }
+
+    if (maxDate) {
+        metadata.push({ key: 'end_date', stringValue: maxDate.toISOString() });
+    }
+
+    console.log(`Uploading thread: ${originalFilename}`);
+    console.log(`  Emails: ${emailParts.length}`);
+    console.log(`  Participants: ${allParticipants.size}`);
+
+    const operation = await ai.fileSearchStores.uploadToFileSearchStore({
+        file: filePath,
+        fileSearchStoreName: storeName,
+        config: {
+            displayName: originalFilename,
+            mimeType: 'text/plain',
+            customMetadata: metadata
+        }
+    });
+
+    await waitForOperation(ai, operation);
 }
 
 async function uploadCommand(ai: GoogleGenAI, path: string, storeName: string, globPattern?: string): Promise<void> {
@@ -348,6 +381,96 @@ async function queryStore(ai: GoogleGenAI, storeName: string, queryText: string,
     }
 }
 
+// --- Get File ---
+
+async function getFile(ai: GoogleGenAI, storeName: string, filename: string): Promise<void> {
+    let fullStoreName = storeName;
+    if (!storeName.startsWith('fileSearchStores/')) {
+        const found = await findStoreByDisplayName(ai, storeName);
+        if (!found) {
+            console.error(`Error: Store with display name "${storeName}" not found.`);
+            return;
+        }
+        fullStoreName = found;
+    }
+
+    console.log(`Looking up file: ${filename} in ${fullStoreName}...`);
+
+    try {
+        const response = await ai.fileSearchStores.documents.list({
+            parent: fullStoreName,
+            config: { pageSize: 20 }
+        });
+
+        const matchingDocs: any[] = [];
+
+        for await (const doc of response) {
+            const d = doc as any;
+            if (d.displayName === filename) {
+                matchingDocs.push(d);
+            }
+        }
+
+        if (matchingDocs.length === 0) {
+            console.error(`Error: No file found with name "${filename}"`);
+            process.exit(1);
+        }
+
+        if (matchingDocs.length === 1) {
+            printDocumentDetails(matchingDocs[0]);
+            return;
+        }
+
+        // Multiple matches - try to disambiguate using directory
+        const dirPart = dirname(filename);
+        if (dirPart && dirPart !== '.') {
+            const dirMatches = matchingDocs.filter(d => {
+                const dirMeta = d.customMetadata?.find((m: any) => m.key === 'directory');
+                return dirMeta?.stringValue?.includes(dirPart);
+            });
+
+            if (dirMatches.length === 1) {
+                printDocumentDetails(dirMatches[0]);
+                return;
+            }
+
+            if (dirMatches.length > 1) {
+                console.error(`Error: Multiple files found matching "${filename}":`);
+                for (const d of dirMatches) {
+                    const dirMeta = d.customMetadata?.find((m: any) => m.key === 'directory');
+                    console.error(`  - ${d.displayName} (directory: ${dirMeta?.stringValue || 'unknown'})`);
+                }
+                process.exit(1);
+            }
+        }
+
+        // Still multiple matches without directory disambiguation
+        console.error(`Error: Multiple files found with name "${filename}":`);
+        for (const d of matchingDocs) {
+            const dirMeta = d.customMetadata?.find((m: any) => m.key === 'directory');
+            console.error(`  - ${d.displayName} (directory: ${dirMeta?.stringValue || 'unknown'})`);
+        }
+        console.error('\nTip: Include a directory path to disambiguate, e.g., "path/to/file.txt"');
+        process.exit(1);
+
+    } catch (e: any) {
+        console.error('Error getting file:', e.message);
+        process.exit(1);
+    }
+}
+
+function printDocumentDetails(doc: any): void {
+    console.log(`\nDocument: ${doc.displayName || '(no name)'}`);
+    console.log(`  Name: ${doc.name}`);
+    if (doc.customMetadata && doc.customMetadata.length > 0) {
+        console.log('  Metadata:');
+        for (const m of doc.customMetadata) {
+            const value = m.stringValue ?? m.numericValue ?? (m.stringListValue ? JSON.stringify(m.stringListValue.values) : 'undefined');
+            console.log(`    ${m.key}: ${value}`);
+        }
+    }
+}
+
 // --- List Files ---
 
 async function listFiles(ai: GoogleGenAI, storeName: string): Promise<void> {
@@ -406,6 +529,7 @@ Commands:
     [--glob <pattern>]                  Optional glob pattern for directory uploads
 
   files list <store>                    List files in a store
+  files get <store> <filename>          Get a specific file by name
   files delete <store> --filter <k=v>   Delete files matching filter
 
   query <store> <query>                 Query a store with natural language
@@ -418,6 +542,7 @@ Examples:
   gemini-file-search upload ./docs --store my-docs
   gemini-file-search upload ./src --store my-code --glob "**/*.ts"
   gemini-file-search files list my-docs
+  gemini-file-search files get my-docs "report.pdf"
   gemini-file-search query my-docs "What are the main features?"
   gemini-file-search query my-docs "Summarize" --filter year=2024
 `);
@@ -482,7 +607,15 @@ async function main() {
         }
 
         case 'files':
-            if (args[1] === 'delete') {
+            if (args[1] === 'get') {
+                const store = args[2];
+                const filename = args[3];
+                if (!store || !filename) {
+                    console.error('Usage: files get <store> <filename>');
+                    process.exit(1);
+                }
+                await getFile(ai, store, filename);
+            } else if (args[1] === 'delete') {
                 const store = args[2];
                 let filter = '';
                 for (let i = 3; i < args.length; i++) {
