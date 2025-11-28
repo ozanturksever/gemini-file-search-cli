@@ -28,7 +28,7 @@
     "cli",
     "bun"
   ],
-  "author": "",
+  "author": "Ozan Turksever <ozan.turksever@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",

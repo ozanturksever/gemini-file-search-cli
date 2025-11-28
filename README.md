@@ -129,10 +129,10 @@ For mbox files, additional metadata is extracted:
 
 Supported models for querying:
 
-- `gemini-2.5-flash` (default)
+- `gemini-3-pro-preview` (default)
+- `gemini-2.5-flash`
 - `gemini-2.5-flash-lite`
 - `gemini-2.5-pro`
-- `gemini-3-pro-preview`
 
 ## License
 

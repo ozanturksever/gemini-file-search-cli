@@ -272,7 +272,7 @@ async function createOrGetStore(ai: GoogleGenAI, storeName: string): Promise<str
 
 // --- Query Logic ---
 
-async function queryStore(ai: GoogleGenAI, storeName: string, queryText: string, modelName: string = 'gemini-2.5-flash', filter?: string): Promise<void> {
+async function queryStore(ai: GoogleGenAI, storeName: string, queryText: string, modelName: string = 'gemini-3-pro-preview', filter?: string): Promise<void> {
     let fullStoreName = storeName;
     if (!storeName.startsWith('fileSearchStores/')) {
         const found = await findStoreByDisplayName(ai, storeName);
@@ -511,7 +511,7 @@ async function main() {
         case 'query': {
             const qStore = args[1];
             const qText = args[2];
-            let model = 'gemini-2.5-flash';
+            let model = 'gemini-3-pro-preview';
             let filter: string | undefined;
 
             for (let i = 3; i < args.length; i++) {
